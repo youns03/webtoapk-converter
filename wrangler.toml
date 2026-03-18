@@ -1,0 +1,12 @@
+name = "webtopack-worker"
+main = "server.ts"
+compatibility_date = "2026-03-15"
+
+[vars]
+GITHUB_OWNER = ""
+GITHUB_REPO = ""
+
+# Secrets should be set via 'wrangler secret put'
+# GITHUB_TOKEN
+# SECRET_KEY
+# WORKER_CALLBACK_SECRET
