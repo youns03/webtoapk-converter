@@ -1,0 +1,111 @@
+name: Build APK from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL of the ZIP file'
+        required: true
+      app_name:
+        description: 'Name of the application'
+        required: true
+        default: 'WebToAPK'
+      build_type:
+        description: 'Type of build (webview or native)'
+        required: true
+        default: 'webview'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: build-apk
+      cancel-in-progress: false
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Inputs
+        run: |
+          echo "ZIP_URL=${{ github.event.inputs.zip_url }}" >> $GITHUB_ENV
+          echo "APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
+          echo "BUILD_TYPE=${{ github.event.inputs.build_type }}" >> $GITHUB_ENV
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip curl rsync clamav
+
+      - name: Download ZIP
+        run: |
+          curl -L -o project.zip "$ZIP_URL"
+          SIZE=$(stat -c%s project.zip)
+          if [ $SIZE -gt 209715200 ]; then
+            echo "File too large (max 200MB)"
+            exit 1
+          fi
+
+      - name: Security Scan
+        run: |
+          # Simple path traversal check
+          if unzip -l project.zip | grep -qE "\.\./|^\/"; then
+            echo "Security Risk: Path traversal detected in ZIP"
+            exit 1
+          fi
+          # Check for dangerous extensions
+          if unzip -l project.zip | grep -qE "\.(sh|py|exe|bat|ps1|rb|pl)$"; then
+            echo "Security Risk: Dangerous file extensions detected"
+            exit 1
+          fi
+
+      - name: Extract & Validate
+        run: |
+          mkdir -p web_files
+          unzip project.zip -d web_files
+          if [ ! -f web_files/index.html ]; then
+            echo "Error: index.html not found in root of ZIP"
+            exit 1
+          fi
+
+      - name: Copy to Assets
+        run: |
+          mkdir -p android/app/src/main/assets/www
+          rsync -av web_files/ android/app/src/main/assets/www/
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make Gradlew Executable
+        run: chmod +x android/gradlew
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf project.zip web_files android/app/src/main/assets/www/*
