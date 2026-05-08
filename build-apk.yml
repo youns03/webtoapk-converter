@@ -1,0 +1,150 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Website URL or ZIP link"
+        required: true
+      app_name:
+        description: "Application name"
+        required: true
+        default: "WebToAPK"
+      package_name:
+        description: "Package name for the Android application (e.g., com.example.myapp)"
+        required: true
+        default: "com.webtopack"
+      icon_path:
+        description: "Path to the icon drawable resource (e.g., @mipmap/my_custom_icon)"
+        required: false
+      splash_screen_path:
+        description: "Path to the splash screen drawable resource"
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: build-apk
+      cancel-in-progress: false
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate Input
+        run: |
+          if [[ "${{ github.event.inputs.url }}" == *.zip ]]; then
+            echo "ZIP_URL=${{ github.event.inputs.url }}" >> $GITHUB_ENV
+            echo "WEB_APP_TYPE=zip" >> $GITHUB_ENV
+          else
+            echo "WEB_APP_URL=${{ github.event.inputs.url }}" >> $GITHUB_ENV
+            echo "WEB_APP_TYPE=url" >> $GITHUB_ENV
+          fi
+          echo "APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
+          echo "PACKAGE_NAME=${{ github.event.inputs.package_name }}" >> $GITHUB_ENV
+          echo "ICON_PATH=${{ github.event.inputs.icon_path }}" >> $GITHUB_ENV
+          echo "SPLASH_SCREEN_PATH=${{ github.event.inputs.splash_screen_path }}" >> $GITHUB_ENV
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip curl rsync clamav
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Download Web App
+        if: env.WEB_APP_TYPE == 'zip'
+        run: |
+          curl -L -o project.zip "$ZIP_URL"
+          SIZE=$(stat -c%s project.zip)
+          if [ $SIZE -gt 209715200 ]; then
+            echo "File too large (max 200MB)"
+            exit 1
+          fi
+
+      - name: Security Scan
+        if: env.WEB_APP_TYPE == 'zip'
+        run: |
+          if unzip -l project.zip | grep -qE "\\.\./|^\\/"; then
+            echo "Security Risk: Path traversal detected in ZIP"
+            exit 1
+          fi
+          if unzip -l project.zip | grep -qE "\\.(sh|py|exe|bat|ps1|rb|pl)$\"; then
+            echo "Security Risk: Dangerous file extensions detected"
+            exit 1
+          fi
+
+      - name: Extract Web App
+        if: env.WEB_APP_TYPE == 'zip'
+        run: |
+          mkdir -p web_files
+          unzip project.zip -d web_files
+          if [ ! -f web_files/index.html ]; then
+            echo "Error: index.html not found in root of ZIP"
+            exit 1
+          fi
+
+      - name: Prepare Android Project
+        run: |
+          cp -r android-template android-app
+
+      - name: Inject Web App
+        run: |
+          if [ "${{ env.WEB_APP_TYPE }}" == "zip" ]; then
+            python3 cli/webtoapk_cli.py \
+              --project_path android-app \
+              --app_name "$APP_NAME" \
+              --package_name "$PACKAGE_NAME" \
+              --web_files_path web_files \
+              ${{ env.ICON_PATH && format("--icon_path {0}", env.ICON_PATH) || "" }} \
+              ${{ env.SPLASH_SCREEN_PATH && format("--splash_screen_path {0}", env.SPLASH_SCREEN_PATH) || "" }}
+          else
+            python3 cli/webtoapk_cli.py \
+              --project_path android-app \
+              --app_name "$APP_NAME" \
+              --package_name "$PACKAGE_NAME" \
+              --web_url "$WEB_APP_URL" \
+              ${{ env.ICON_PATH && format("--icon_path {0}", env.ICON_PATH) || "" }} \
+              ${{ env.SPLASH_SCREEN_PATH && format("--splash_screen_path {0}", env.SPLASH_SCREEN_PATH) || "" }}
+          fi
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make Gradlew Executable
+        run: chmod +x android-app/gradlew
+
+      - name: Build APK
+        run: |
+          cd android-app
+          ./gradlew assembleDebug
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: android-app/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf project.zip web_files android-app
